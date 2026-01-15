@@ -1,0 +1,103 @@
+<Window x:Class="MoshiLiveCaption.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sherpa Onnx Settings" Height="480" Width="550"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize" Background="#252526">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#CCC"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#333"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="2"/>
+            <Setter Property="Height" Value="24"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#444"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Margin" Value="5,0,0,0"/>
+        </Style>
+    </Window.Resources>
+    
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="15"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="15"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="100"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="30"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Encoder -->
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="Encoder:"/>
+        <TextBox Grid.Row="0" Grid.Column="1" x:Name="EncoderBox" Margin="0,5"/>
+        <Button Grid.Row="0" Grid.Column="2" Content="..." Click="BrowseEncoder_Click" Margin="5,5,0,5"/>
+
+        <!-- Decoder -->
+        <TextBlock Grid.Row="1" Grid.Column="0" Text="Decoder:"/>
+        <TextBox Grid.Row="1" Grid.Column="1" x:Name="DecoderBox" Margin="0,5"/>
+        <Button Grid.Row="1" Grid.Column="2" Content="..." Click="BrowseDecoder_Click" Margin="5,5,0,5"/>
+
+        <!-- Joiner -->
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Joiner:"/>
+        <TextBox Grid.Row="2" Grid.Column="1" x:Name="JoinerBox" Margin="0,5"/>
+        <Button Grid.Row="2" Grid.Column="2" Content="..." Click="BrowseJoiner_Click" Margin="5,5,0,5"/>
+
+        <!-- Tokens -->
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Tokens:"/>
+        <TextBox Grid.Row="3" Grid.Column="1" x:Name="TokensBox" Margin="0,5"/>
+        <Button Grid.Row="3" Grid.Column="2" Content="..." Click="BrowseTokens_Click" Margin="5,5,0,5"/>
+
+        <!-- Separator -->
+        <Border Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" BorderBrush="#555" BorderThickness="0,0,0,1"/>
+
+        <!-- Sample Wav Path -->
+        <TextBlock Grid.Row="5" Grid.Column="0" Text="Sample Wav:"/>
+        <TextBox Grid.Row="5" Grid.Column="1" x:Name="SampleWavBox" Margin="0,5" ToolTip="Folder containing sample .wav files"/>
+        <Button Grid.Row="5" Grid.Column="2" Content="..." Click="BrowseSampleWav_Click" Margin="5,5,0,5"/>
+
+        <!-- Separator 2 -->
+        <Border Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" BorderBrush="#555" BorderThickness="0,0,0,1"/>
+
+        <!-- Model Actions -->
+        <TextBlock Grid.Row="7" Grid.Column="0" Text="Model:" FontWeight="Bold"/>
+        <StackPanel Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,5">
+            <Button x:Name="LoadModelBtn" Content="📦 Load Model" Click="LoadModel_Click" Padding="10,3" Background="#007ACC"/>
+            <Button x:Name="DecodeSampleBtn" Content="🎵 Decode Sample" Click="DecodeSample_Click" Padding="10,3" IsEnabled="False" Margin="10,0,0,0"/>
+            <TextBlock x:Name="ModelStatusText" Text="Not Loaded" Foreground="#888" Margin="15,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Results Text Area -->
+        <TextBlock Grid.Row="8" Grid.Column="0" Text="Results:" Margin="0,10,0,0"/>
+        <TextBox Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="3" 
+                 x:Name="ResultsBox" 
+                 Height="120" 
+                 Margin="0,5"
+                 TextWrapping="Wrap" 
+                 AcceptsReturn="True" 
+                 VerticalScrollBarVisibility="Auto"
+                 IsReadOnly="True"
+                 Background="#1E1E1E"
+                 Foreground="#DDD"
+                 FontFamily="Consolas"
+                 FontSize="11"/>
+        
+        <!-- Close Button -->
+        <Button Grid.Row="10" Grid.Column="1" Content="Close" Height="30" Background="#555" Click="Close_Click" Margin="0,10,0,0"/>
+    </Grid>
+</Window>
