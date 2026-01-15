@@ -4,6 +4,10 @@ This repository is a fork of `sherpa-onnx` created to implement a local, real-ti
 
 Inspired (and slightly shocked) by the performance and utility of Windows Live Captions, this project aims to replicate that experience using the open-source **Sherpa-Onnx** engine. It focuses on building a native Windows application with full GPU acceleration (CUDA) for low-latency, high-accuracy streaming transcription.
 
+## Demo example in Korean
+![Sherpa Live Caption GUI Demo](gui_demo.gif)
+
+
 ---
 
 ## 1. Prerequisites
