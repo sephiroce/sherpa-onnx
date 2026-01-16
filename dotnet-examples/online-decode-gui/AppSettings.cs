@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace MoshiLiveCaption
+namespace SherpaOnnxASR
 {
     public static class AppSettings
     {
@@ -13,6 +13,9 @@ namespace MoshiLiveCaption
         
         // Sample wav folder path for testing
         public static string SampleWavPath { get; set; } = "";
+        
+        // Microphone gain (amplification factor for quiet mics)
+        public static float MicGain { get; set; } = 7.0f;
         
         public static bool IsConfigured => 
             !string.IsNullOrEmpty(EncoderPath) && File.Exists(EncoderPath) &&

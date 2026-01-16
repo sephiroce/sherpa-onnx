@@ -2,38 +2,102 @@ using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
-namespace MoshiLiveCaption
+namespace SherpaOnnxASR
 {
+    public class AudioInputDevice
+    {
+        public int Index { get; set; }  // -1 for System Audio, 0+ for mic devices
+        public string Name { get; set; } = "";
+        public bool IsSystemAudio => Index == -1;
+        
+        public override string ToString() => Name;
+    }
+
     public class AudioService : IDisposable
     {
-        private WasapiLoopbackCapture? _capture;
+        private IWaveIn? _waveIn;
         private BufferedWaveProvider? _bufferedWave;
         private ISampleProvider? _sampleProvider;
         
         private Thread? _processThread;
         private volatile bool _isCapturing;
 
-        // SherpaOnnx 표준: 16kHz
         private const int TARGET_SAMPLE_RATE = 16000;
 
         public event Action<string>? OnLog;
         public event Action<float[]>? OnAudioAvailable; 
         public event Action<double>? OnAudioProcessed;
         public event Action<bool>? OnVadStatus;
+        public event Action<double>? OnLevelChanged;  // Audio level in dB (-60 to 0)
 
+        // Selected device index (-1 = System Audio, 0+ = mic)
+        public int SelectedDeviceIndex { get; private set; } = -1;
+        
+        // Microphone gain (amplification factor for quiet mics) - read from AppSettings
+        public float MicGain => AppSettings.MicGain;
+        
         // VAD Settings
         private const float VAD_THRESHOLD = 0.005f; 
-        private const double VAD_HANGOVER_SEC = 1.0;  // Hangover를 줄임 (trailing audio)
+        private const double VAD_HANGOVER_SEC = 1.0;
         private DateTime _lastSpeechTime = DateTime.MinValue;
         private bool _wasSpeaking = false;
         
-        // Ring buffer for 1 second of audio (to prepend context when speech starts)
+        // Level meter throttling (max 10 updates/sec)
+        private DateTime _lastLevelUpdate = DateTime.MinValue;
+        private const double LEVEL_UPDATE_INTERVAL_MS = 100;
+        
+        // Ring buffer for 1 second of audio
         private const int RING_BUFFER_SEC = 1;
         private readonly List<float> _ringBuffer = new List<float>();
         private readonly int _ringBufferMaxSize = TARGET_SAMPLE_RATE * RING_BUFFER_SEC;
-        private bool _contextSent = false;  // true after we send the pre-speech context
+        private bool _contextSent = false;
+
+        /// <summary>
+        /// Get list of available audio input devices (System Audio + microphones)
+        /// </summary>
+        public static List<AudioInputDevice> GetAudioInputDevices()
+        {
+            var list = new List<AudioInputDevice>
+            {
+                new AudioInputDevice { Index = -1, Name = "🔊 System Audio" }
+            };
+            
+            try
+            {
+                for (int i = 0; i < WaveInEvent.DeviceCount; i++)
+                {
+                    var caps = WaveInEvent.GetCapabilities(i);
+                    list.Add(new AudioInputDevice 
+                    { 
+                        Index = i, 
+                        Name = $"🎤 {caps.ProductName}" 
+                    });
+                }
+            }
+            catch { }
+            
+            return list;
+        }
+
+        /// <summary>
+        /// Set audio input device (only when not capturing)
+        /// </summary>
+        public bool SetDevice(int deviceIndex)
+        {
+            if (_isCapturing)
+            {
+                OnLog?.Invoke("Cannot change input while capturing");
+                return false;
+            }
+
+            SelectedDeviceIndex = deviceIndex;
+            string name = deviceIndex == -1 ? "System Audio" : $"Mic {deviceIndex}";
+            OnLog?.Invoke($"Audio input set to: {name}");
+            return true;
+        }
 
         public void StartCapture()
         {
@@ -41,44 +105,92 @@ namespace MoshiLiveCaption
 
             try
             {
-                _capture = new WasapiLoopbackCapture();
-                
-                _bufferedWave = new BufferedWaveProvider(_capture.WaveFormat);
-                _bufferedWave.BufferDuration = TimeSpan.FromSeconds(5);
-                _bufferedWave.DiscardOnBufferOverflow = true;
-
-                // NAudio 파이프라인: Raw -> Float -> Resample(16k) -> Mono
-                ISampleProvider source = _bufferedWave.ToSampleProvider();
-                
-                if (source.WaveFormat.SampleRate != TARGET_SAMPLE_RATE)
+                if (SelectedDeviceIndex >= 0)
                 {
-                    source = new WdlResamplingSampleProvider(source, TARGET_SAMPLE_RATE);
+                    // [FIX] 마이크 입력 설정
+                    var waveIn = new WaveInEvent();
+                    waveIn.DeviceNumber = SelectedDeviceIndex;
+                    
+                    // 핵심 수정: 고품질 포맷 강제 지정 (44.1kHz, 16bit, Mono)
+                    // 이렇게 해야 8kHz(전화기 음질)로 잡히는 문제를 막을 수 있습니다.
+                    waveIn.WaveFormat = new WaveFormat(44100, 16, 1); 
+
+                    waveIn.BufferMilliseconds = 100;
+                    _waveIn = waveIn;
+
+                    _bufferedWave = new BufferedWaveProvider(_waveIn.WaveFormat);
+                    _bufferedWave.BufferDuration = TimeSpan.FromSeconds(5);
+                    _bufferedWave.DiscardOnBufferOverflow = true;
+
+                    // 파이프라인: Buffered -> Sample -> Resample (필요시)
+                    ISampleProvider source = _bufferedWave.ToSampleProvider();
+
+                    // 44.1kHz -> 16kHz 리샘플링
+                    if (source.WaveFormat.SampleRate != TARGET_SAMPLE_RATE)
+                    {
+                        source = new WdlResamplingSampleProvider(source, TARGET_SAMPLE_RATE);
+                    }
+
+                    // 위에서 Mono(1채널)로 강제했으므로, 
+                    // 스테레오 믹싱 로직(소리 작아짐/위상 문제 원인)은 자연스럽게 건너뛰게 됩니다.
+                    if (source.WaveFormat.Channels > 1)
+                    {
+                        source = new StereoToMonoSampleProvider(source)
+                        {
+                            LeftVolume = 0.5f,
+                            RightVolume = 0.5f
+                        };
+                    }
+
+                    _sampleProvider = source;
+                    OnLog?.Invoke($"Using Microphone #{SelectedDeviceIndex} (Forced 44.1kHz -> 16kHz)");
                 }
-                
-                if (source.WaveFormat.Channels > 1)
+                else
                 {
-                    source = new StereoToMonoSampleProvider(source) { LeftVolume = 0.5f, RightVolume = 0.5f };
+                    // 시스템 오디오 (루프백) - 기존과 동일
+                    var loopback = new WasapiLoopbackCapture();
+                    _waveIn = loopback;
+                    _bufferedWave = new BufferedWaveProvider(_waveIn.WaveFormat);
+                    _bufferedWave.BufferDuration = TimeSpan.FromSeconds(5);
+                    _bufferedWave.DiscardOnBufferOverflow = true;
+
+                    ISampleProvider source = _bufferedWave.ToSampleProvider();
+                    
+                    if (source.WaveFormat.SampleRate != TARGET_SAMPLE_RATE)
+                    {
+                        source = new WdlResamplingSampleProvider(source, TARGET_SAMPLE_RATE);
+                    }
+                    
+                    if (source.WaveFormat.Channels > 1)
+                    {
+                        source = new StereoToMonoSampleProvider(source)
+                        {
+                            LeftVolume = 0.5f,
+                            RightVolume = 0.5f
+                        };
+                    }
+                    
+                    _sampleProvider = source;
+                    OnLog?.Invoke("Using System Audio (loopback)");
                 }
 
-                _sampleProvider = source;
+                // 공통 실행 로직
+                _waveIn.DataAvailable += (s, e) => _bufferedWave?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                _waveIn.RecordingStopped += (s, e) => OnLog?.Invoke("Capture Stopped.");
 
-                _capture.DataAvailable += (s, e) => _bufferedWave.AddSamples(e.Buffer, 0, e.BytesRecorded);
-                _capture.RecordingStopped += (s, e) => OnLog?.Invoke("Capture Stopped.");
-
-                // Reset state
                 _ringBuffer.Clear();
                 _contextSent = false;
                 _wasSpeaking = false;
                 _lastSpeechTime = DateTime.MinValue;
                 
                 _isCapturing = true;
-                _capture.StartRecording();
+                _waveIn.StartRecording();
 
                 _processThread = new Thread(ProcessLoop);
                 _processThread.IsBackground = true;
                 _processThread.Start();
                 
-                OnLog?.Invoke($"Capturing started. Resampling to 16kHz.");
+                OnLog?.Invoke("Capturing started.");
             }
             catch (Exception ex)
             {
@@ -89,8 +201,11 @@ namespace MoshiLiveCaption
 
         private void ProcessLoop()
         {
-            int bufferSize = (int)(TARGET_SAMPLE_RATE * 0.1); // 0.1초 버퍼
+            int bufferSize = (int)(TARGET_SAMPLE_RATE * 0.1);
             float[] buffer = new float[bufferSize];
+            
+            // Use higher threshold for mic input
+            float vadThreshold = SelectedDeviceIndex >= 0 ? 0.01f : VAD_THRESHOLD;
 
             while (_isCapturing && _sampleProvider != null)
             {
@@ -110,26 +225,44 @@ namespace MoshiLiveCaption
                     {
                         float[] validSamples = new float[samplesRead];
                         Array.Copy(buffer, validSamples, samplesRead);
+                        
+                        // Apply mic gain (only for microphone input)
+                        if (SelectedDeviceIndex >= 0 && MicGain != 1.0f)
+                        {
+                            for (int i = 0; i < samplesRead; i++)
+                            {
+                                validSamples[i] *= MicGain;
+                                // Clip to prevent distortion
+                                if (validSamples[i] > 1.0f) validSamples[i] = 1.0f;
+                                else if (validSamples[i] < -1.0f) validSamples[i] = -1.0f;
+                            }
+                        }
 
-                        // VAD Check (RMS)
                         float sumSquares = 0;
                         for (int i = 0; i < samplesRead; i++) 
                             sumSquares += validSamples[i] * validSamples[i];
                         double rms = Math.Sqrt(sumSquares / samplesRead);
+                        
+                        // Report level (throttled to ~10 updates/sec)
+                        if ((DateTime.Now - _lastLevelUpdate).TotalMilliseconds >= LEVEL_UPDATE_INTERVAL_MS)
+                        {
+                            // Convert RMS to dB (clamp to -60 to 0 range)
+                            double db = rms > 0.000001 ? 20 * Math.Log10(rms) : -60;
+                            db = Math.Max(-60, Math.Min(0, db));
+                            OnLevelChanged?.Invoke(db);
+                            _lastLevelUpdate = DateTime.Now;
+                        }
 
-                        // Detect if currently speaking
-                        bool hasVoice = rms > VAD_THRESHOLD;
+                        bool hasVoice = rms > vadThreshold;
                         if (hasVoice)
                         {
                             _lastSpeechTime = DateTime.Now;
                         }
                         
-                        // Speaking = voice detected OR within hangover period
                         bool isSpeaking = hasVoice || 
                             (_lastSpeechTime != DateTime.MinValue && 
                              (DateTime.Now - _lastSpeechTime).TotalSeconds < VAD_HANGOVER_SEC);
 
-                        // Notify VAD status change
                         if (isSpeaking != _wasSpeaking)
                         {
                             _wasSpeaking = isSpeaking;
@@ -138,9 +271,6 @@ namespace MoshiLiveCaption
 
                         if (isSpeaking)
                         {
-                            // --- SPEECH DETECTED ---
-                            
-                            // First, send the 1-second context buffer (only once per speech segment)
                             if (!_contextSent && _ringBuffer.Count > 0)
                             {
                                 float[] contextAudio = _ringBuffer.ToArray();
@@ -148,27 +278,20 @@ namespace MoshiLiveCaption
                                 OnAudioProcessed?.Invoke(contextAudio.Length / (double)TARGET_SAMPLE_RATE);
                                 _ringBuffer.Clear();
                                 _contextSent = true;
-                                OnLog?.Invoke($"Sent {contextAudio.Length / (double)TARGET_SAMPLE_RATE:F2}s context buffer");
                             }
                             
-                            // Send current audio chunk
                             OnAudioAvailable?.Invoke(validSamples);
                             OnAudioProcessed?.Invoke(samplesRead / (double)TARGET_SAMPLE_RATE);
                         }
                         else
                         {
-                            // --- SILENCE ---
-                            
-                            // Add current audio to ring buffer (keep last 1 sec)
                             _ringBuffer.AddRange(validSamples);
                             
-                            // Trim to max size
                             if (_ringBuffer.Count > _ringBufferMaxSize)
                             {
                                 _ringBuffer.RemoveRange(0, _ringBuffer.Count - _ringBufferMaxSize);
                             }
                             
-                            // Reset context flag so next speech will send buffer
                             _contextSent = false;
                         }
                     }
@@ -180,9 +303,10 @@ namespace MoshiLiveCaption
         public void StopCapture()
         {
             _isCapturing = false;
-            try { _capture?.StopRecording(); } catch { }
+            try { _waveIn?.StopRecording(); } catch { }
             Thread.Sleep(50); 
-            try { _capture?.Dispose(); } catch { }
+            try { _waveIn?.Dispose(); } catch { }
+            _waveIn = null;
             _sampleProvider = null;
             _bufferedWave = null;
         }

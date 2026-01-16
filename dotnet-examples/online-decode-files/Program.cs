@@ -9,6 +9,7 @@
 using CommandLine;
 using CommandLine.Text;
 using SherpaOnnx;
+using Microsoft.ML.OnnxRuntime; // NuGet 패키지 필요
 
 class OnlineDecodeFiles
 {
@@ -91,6 +92,10 @@ larger than this value. Used only when --enable-endpoint is true.")]
 
     [Option("files", Required = true, HelpText = "Audio files for decoding")]
     public IEnumerable<string> Files { get; set; } = new string[] {};
+	
+	[Option("show-intermediate", Required = false, Default = false, 
+		HelpText = "If true, then partial results are printed.")]
+	public bool ShowIntermediate { get; set; }	
   }
 
   static void Main(string[] args)
@@ -163,23 +168,19 @@ to download pre-trained streaming models.
   {
     var config = new OnlineRecognizerConfig();
     config.FeatConfig.SampleRate = options.SampleRate;
-
-    // All models from icefall using feature dim 80.
-    // You can change it if your model has a different feature dim.
     config.FeatConfig.FeatureDim = 80;
 
     config.ModelConfig.Transducer.Encoder = options.Encoder;
     config.ModelConfig.Transducer.Decoder = options.Decoder;
     config.ModelConfig.Transducer.Joiner = options.Joiner;
-
     config.ModelConfig.Paraformer.Encoder = options.ParaformerEncoder;
     config.ModelConfig.Paraformer.Decoder = options.ParaformerDecoder;
-
     config.ModelConfig.Zipformer2Ctc.Model = options.Zipformer2Ctc;
     config.ModelConfig.ToneCtc.Model = options.ToneCtc;
 
     config.ModelConfig.Tokens = options.Tokens;
-    config.ModelConfig.Provider = options.Provider;
+	string given_provider = options.Provider.ToLower().Contains("gpu") ? "cuda" : options.Provider;
+	config.ModelConfig.Provider = given_provider;
     config.ModelConfig.NumThreads = options.NumThreads;
     config.ModelConfig.Debug = options.Debug ? 1 : 0;
 
@@ -194,58 +195,161 @@ to download pre-trained streaming models.
     config.HotwordsScore = options.HotwordsScore;
     config.RuleFsts = options.RuleFsts;
 
+    // 1. 현재 로드된 ONNX Runtime이 진짜로 CUDA를 보고 있는지 확인
+	var providers = Microsoft.ML.OnnxRuntime.OrtEnv.Instance().GetAvailableProviders();
+    bool isCudaAvailable = providers.Any(p => p.Contains("CUDA", StringComparison.OrdinalIgnoreCase));
+
+    // 2. Recognizer 생성
     var recognizer = new OnlineRecognizer(config);
 
     var files = options.Files.ToArray();
-
-    // We create a separate stream for each file
     var streams = new List<OnlineStream>();
-    streams.EnsureCapacity(files.Length);
+    var audioDurations = new List<double>(); // 파일별 음성 길이를 저장
 
+    streams.EnsureCapacity(files.Length);
+    audioDurations.EnsureCapacity(files.Length);
+
+    // 1. 스트림 생성 및 오디오 데이터 입력
     for (int i = 0; i != files.Length; ++i)
     {
       var s = recognizer.CreateStream();
-
       var waveReader = new WaveReader(files[i]);
+      
+      // 음성 길이 계산 (샘플 수 / 샘플 레이트)
+      double duration = (double)waveReader.Samples.Length / waveReader.SampleRate;
+      audioDurations.Add(duration);
 
       var leftPadding = new float[(int)(waveReader.SampleRate * 0.3)];
       s.AcceptWaveform(waveReader.SampleRate, leftPadding);
-
       s.AcceptWaveform(waveReader.SampleRate, waveReader.Samples);
-
       var tailPadding = new float[(int)(waveReader.SampleRate * 0.6)];
       s.AcceptWaveform(waveReader.SampleRate, tailPadding);
 
       s.InputFinished();
-
       streams.Add(s);
     }
 
-    while (true)
-    {
-      var readyStreams = streams.Where(s => recognizer.IsReady(s));
-      if (!readyStreams.Any())
-      {
-        break;
-      }
+	// 2. 디코딩 및 실시간 결과 확인
+	var sw = System.Diagnostics.Stopwatch.StartNew();
 
-      recognizer.Decode(readyStreams);
-    }
+	// 각 스트림의 마지막 텍스트 상태를 저장하기 위한 배열
+	string[] lastTexts = new string[streams.Count];
+	Array.Fill(lastTexts, "");
 
-    // display results
+	bool[] isFinalPrinted = new bool[streams.Count];
+
+	Console.WriteLine("\n--- Start decoding ---");
+
+	while (true)
+	{
+	    var readyStreams = streams.Where(s => recognizer.IsReady(s)).ToList();
+	    
+	    // 모든 파일의 출력이 끝났고, 더 이상 처리할 스트림도 없다면 루프 종료
+	    if (!readyStreams.Any() && isFinalPrinted.All(printed => printed))
+	    {
+	        break;
+	    }
+
+	    // 연산 수행
+	    if (readyStreams.Any())
+	    {
+	        recognizer.Decode(readyStreams);
+	    }
+
+	    // 2. 루프 내부에서 각 파일별로 완료 여부 체크
+	    for (int i = 0; i < streams.Count; i++)
+	    {
+	        // 아직 최종 결과를 안 찍었는데, 해당 스트림이 더 이상 Ready가 아니면 (디코딩 완료)
+	        if (!isFinalPrinted[i] && !recognizer.IsReady(streams[i]))
+	        {
+	            var result = recognizer.GetResult(streams[i]);
+	            
+	            // --- 해당 파일에 대한 최종 결과 출력 ---
+	            Console.WriteLine($"\n" + new string('=', 40));
+	            Console.WriteLine($"[INDEX {i}] 최종 완료: {files[i]}");
+	            Console.WriteLine($"[TEXT {i}]: {result.Text}");
+	            
+	            // 타임스탬프 상세 출력
+	            Console.WriteLine($"[TIMESTAMPS {i}]:");
+	            for (int j = 0; j < result.Tokens.Length; j++)
+	            {
+	                Console.Write($"[{result.Timestamps[j]:F2}s:{result.Tokens[j]}] ");
+	                if ((j + 1) % 5 == 0) Console.WriteLine();
+	            }
+	            Console.WriteLine("\n" + new string('=', 40));
+
+	            isFinalPrinted[i] = true; // 중복 출력 방지
+	        }
+	        // 완료 전에는 중간 결과 보여주기 (옵션이 켜져 있을 때)
+			else if (options.ShowIntermediate && !isFinalPrinted[i])
+			{
+				var result = recognizer.GetResult(streams[i]);
+				if (!string.IsNullOrEmpty(result.Text) && result.Text != lastTexts[i])
+				{
+					// 1. 현재까지 인식된 모든 토큰과 타임스탬프를 한 줄의 문자열로 조합
+					var timedTokens = new System.Text.StringBuilder();
+					for (int j = 0; j < result.Tokens.Length; j++)
+					{
+						string token = result.Tokens[j];
+						float time = result.Timestamps[j];
+						
+						// 최종 결과와 동일한 포맷: [시간s:토큰]
+						timedTokens.Append($"[{time:F2}s:{token}] ");
+					}
+
+					// 2. 조합된 전체 문장 출력
+					Console.WriteLine($"[진행중 {i}] {timedTokens.ToString()}");
+					
+					lastTexts[i] = result.Text;
+				}				
+			}
+	    }
+	}	
+
+    sw.Stop(); // 디코딩 종료
+	
+	
+
+    double totalElapsedSeconds = sw.Elapsed.TotalSeconds;
+
+    // 3. 결과 표시 및 RTF 계산 출력
+    Console.WriteLine("\n" + new string('=', 50));
+    Console.WriteLine("ASR Decoding Results & Performance");
+    Console.WriteLine(new string('=', 50));
+
+    double totalAudioDuration = audioDurations.Sum();
+
     for (int i = 0; i != files.Length; ++i)
     {
       var r = recognizer.GetResult(streams[i]);
-      var text = r.Text;
-      var tokens = r.Tokens;
+      Console.WriteLine($"File {i}: {files[i]}");
+      Console.WriteLine($"Text {i}: {r.Text}");
+      Console.WriteLine($"Audio Duration {i}: {audioDurations[i]:F2}s");
       Console.WriteLine("--------------------");
-      Console.WriteLine(files[i]);
-      Console.WriteLine("text: {0}", text);
-      Console.WriteLine("tokens: [{0}]", string.Join(", ", tokens));
-      Console.Write("timestamps: [");
-      r.Timestamps.ToList().ForEach(i => Console.Write(string.Format("{0:0.00}", i) + ", "));
-      Console.WriteLine("]");
     }
-    Console.WriteLine("--------------------");
+
+    // 전체 성능 지표 출력
+    double rtf = totalElapsedSeconds / totalAudioDuration;
+    Console.WriteLine($"Total Audio Duration : {totalAudioDuration:F2} s");
+    Console.WriteLine($"Total Processing Time: {totalElapsedSeconds:F4} s");
+    Console.WriteLine($"RTF (Processing/Audio): {rtf:F4}");
+	
+	string actualDevice = "CPU";
+    
+    // 사용자가 cuda를 요청했고, 시스템에 cuda 프로바이더가 로드되었을 때만 GPU로 인정
+    if (given_provider == "cuda" && isCudaAvailable)
+    {
+        actualDevice = "GPU (CUDA)";
+    }
+
+    Console.WriteLine($"\n" + new string('-', 30));
+    Console.WriteLine($"[Requested Device]: {options.Provider}");
+    Console.WriteLine($"[Available Providers]: {string.Join(", ", providers)}");
+    Console.WriteLine($"[Actual Execution]: {actualDevice}");
+    Console.WriteLine($"[RTF Performance]: {rtf:F4}");
+    
+    Console.WriteLine(new string('=', 50));
   }
 }
+
+

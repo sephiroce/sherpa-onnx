@@ -3,7 +3,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 
-namespace MoshiLiveCaption
+namespace SherpaOnnxASR
 {
     public partial class MainWindow : Window
     {
@@ -30,6 +30,11 @@ namespace MoshiLiveCaption
                 Dispatcher.Invoke(UpdateMetrics);
             };
             
+            // 1.5 Level meter
+            _audioService.OnLevelChanged += (db) => {
+                Dispatcher.Invoke(() => UpdateLevelMeter(db));
+            };
+            
             // 2. Audio -> Sherpa 연결
             _audioService.OnAudioAvailable += (samples) => Sherpa.AcceptWaveform(samples);
             _audioService.OnAudioProcessed += (sec) => {
@@ -41,6 +46,68 @@ namespace MoshiLiveCaption
             Sherpa.OnTextReceived += OnTextReceived;
             
             UpdateModelStatus();
+            PopulateAudioInputCombo();
+        }
+        
+        private void UpdateLevelMeter(double db)
+        {
+            // db is in range -60 to 0
+            LevelText.Text = $"{db:F0}dB";
+            
+            // Map -60~0 to 0~60 width
+            double width = ((db + 60) / 60) * 60;
+            width = Math.Max(0, Math.Min(60, width));
+            LevelBar.Width = width;
+            
+            // Color based on level: gray < -40, green < -12, yellow < -6, red >= -6
+            if (db < -40)
+                LevelBar.Fill = Brushes.DimGray;
+            else if (db < -12)
+                LevelBar.Fill = Brushes.LimeGreen;
+            else if (db < -6)
+                LevelBar.Fill = Brushes.Yellow;
+            else
+                LevelBar.Fill = Brushes.Red;
+        }
+
+        private void PopulateAudioInputCombo()
+        {
+            AudioInputCombo.Items.Clear();
+            var devices = AudioService.GetAudioInputDevices();
+            foreach (var device in devices)
+            {
+                AudioInputCombo.Items.Add(device);
+            }
+            
+            // Select System Audio by default (index 0)
+            if (AudioInputCombo.Items.Count > 0)
+            {
+                AudioInputCombo.SelectedIndex = 0;
+            }
+        }
+
+        private void AudioInputCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (_audioService == null) return;
+            if (AudioInputCombo.SelectedItem is AudioInputDevice device)
+            {
+                if (_isProcessing)
+                {
+                    // Revert selection if processing
+                    MessageBox.Show("Stop recording before switching audio input.", "Cannot Switch");
+                    // Find and select current device
+                    foreach (var item in AudioInputCombo.Items)
+                    {
+                        if (item is AudioInputDevice d && d.Index == _audioService.SelectedDeviceIndex)
+                        {
+                            AudioInputCombo.SelectedItem = d;
+                            break;
+                        }
+                    }
+                    return;
+                }
+                _audioService.SetDevice(device.Index);
+            }
         }
 
         private void UpdateModelStatus()
@@ -109,6 +176,12 @@ namespace MoshiLiveCaption
                 ControlBtn.Content = "⏹ Stop";
                 ControlBtn.Background = Brushes.Crimson;
                 
+                // Disable controls during recording with darker appearance
+                SettingsBtn.IsEnabled = false;
+                SettingsBtn.Foreground = Brushes.Gray;
+                AudioInputCombo.IsEnabled = false;
+                AudioInputCombo.Opacity = 0.5;
+                
                 UpdateMetrics();
             }
             catch (Exception ex)
@@ -127,6 +200,12 @@ namespace MoshiLiveCaption
             ControlBtn.Content = "▶ Start";
             ControlBtn.Background = new SolidColorBrush(Color.FromRgb(0, 122, 204));
             _isVadActive = false;
+            
+            // Re-enable controls with normal appearance
+            SettingsBtn.IsEnabled = true;
+            SettingsBtn.Foreground = Brushes.White;
+            AudioInputCombo.IsEnabled = true;
+            AudioInputCombo.Opacity = 1.0;
             
             UpdateMetrics();
         }

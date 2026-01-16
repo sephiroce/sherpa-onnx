@@ -3,7 +3,7 @@ using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Media;
 
-namespace MoshiLiveCaption
+namespace SherpaOnnxASR
 {
     public partial class SettingsWindow : Window
     {
@@ -23,6 +23,8 @@ namespace MoshiLiveCaption
             JoinerBox.Text = AppSettings.JoinerPath;
             TokensBox.Text = AppSettings.TokensPath;
             SampleWavBox.Text = AppSettings.SampleWavPath;
+            MicGainBox.Text = AppSettings.MicGain.ToString("F1");
+            DebugSaveCheck.IsChecked = Sherpa.SaveDebugAudio;
         }
 
         private void SaveSettings()
@@ -32,6 +34,23 @@ namespace MoshiLiveCaption
             AppSettings.JoinerPath = JoinerBox.Text;
             AppSettings.TokensPath = TokensBox.Text;
             AppSettings.SampleWavPath = SampleWavBox.Text;
+            
+            // Parse Mic Gain and log if changed
+            float oldGain = AppSettings.MicGain;
+            if (float.TryParse(MicGainBox.Text, out float gain) && gain >= 0.1f && gain <= 20.0f)
+            {
+                if (gain != oldGain)
+                {
+                    AppSettings.MicGain = gain;
+                    ResultsBox.Text += $"\n🎤 Mic Gain changed: {oldGain:F1}x → {gain:F1}x";
+                }
+            }
+            else
+            {
+                // Invalid value - keep old value and restore textbox
+                MicGainBox.Text = oldGain.ToString("F1");
+                ResultsBox.Text += $"\n⚠️ Invalid Mic Gain value. Keeping {oldGain:F1}x";
+            }
         }
 
         private void UpdateModelStatus()
@@ -39,15 +58,14 @@ namespace MoshiLiveCaption
             bool isLoaded = Sherpa.IsModelLoaded;
             string provider = Sherpa.CurrentProvider;
             
+            // Show status in ResultsBox instead of removed ModelStatusText
             if (isLoaded)
             {
-                ModelStatusText.Text = $"Loaded ({provider})";
-                ModelStatusText.Foreground = provider == "CUDA" ? Brushes.LightGreen : Brushes.LightBlue;
+                ResultsBox.Text = $"✓ Model loaded ({provider})";
             }
             else
             {
-                ModelStatusText.Text = "Not Loaded";
-                ModelStatusText.Foreground = Brushes.Gray;
+                ResultsBox.Text = "Model not loaded. Configure paths and click 'Load Model'.";
             }
             
             DecodeSampleBtn.IsEnabled = isLoaded && !string.IsNullOrEmpty(SampleWavBox.Text);
@@ -77,6 +95,11 @@ namespace MoshiLiveCaption
         {
             BrowseFolder(SampleWavBox, "Select folder containing sample .wav files");
             UpdateModelStatus();
+        }
+        
+        private void DebugSave_Changed(object sender, RoutedEventArgs e)
+        {
+            Sherpa.SaveDebugAudio = DebugSaveCheck.IsChecked == true;
         }
 
         private async void LoadModel_Click(object sender, RoutedEventArgs e)

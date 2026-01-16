@@ -10,7 +10,24 @@
 
   <ItemGroup>
     <PackageReference Include="CommandLineParser" Version="2.9.1" />
+	<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.19.2" />
     <ProjectReference Include="..\Common\Common.csproj" />
   </ItemGroup>
 
+<Target Name="CopyCustomNativeDLLs" AfterTargets="Build">
+  <PropertyGroup>
+    <NativeOutDir>$(OutputPath)runtimes\win-x64\native\</NativeOutDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <CustomDLLs Include="..\..\build\bin\Release\*.dll" />
+    <ORTDLLs Include="..\..\build\_deps\onnxruntime-src\lib\*.dll" />
+  </ItemGroup>
+  
+  <Message Text="🚀 Copying GPU Native DLLs to $(NativeOutDir)" Importance="high" />
+  <Copy SourceFiles="@(CustomDLLs)" DestinationFolder="$(NativeOutDir)" SkipUnchangedFiles="false" />
+  <Copy SourceFiles="@(ORTDLLs)" DestinationFolder="$(NativeOutDir)" SkipUnchangedFiles="false" />
+</Target>
+
 </Project>
+
+

@@ -9,7 +9,7 @@ using NAudio.Wave.SampleProviders;
 using SherpaOnnx;
 using Microsoft.ML.OnnxRuntime; // NuGet 패키지 필요
 
-namespace MoshiLiveCaption
+namespace SherpaOnnxASR
 {
     /// <summary>
     /// Singleton-like service for Sherpa-Onnx model management.
@@ -30,6 +30,10 @@ namespace MoshiLiveCaption
         public bool IsModelLoaded => _recognizer != null;
         
         public event Action<string, bool>? OnTextReceived;
+        
+        // Debug audio save
+        public bool SaveDebugAudio { get; set; } = false;
+        private List<float>? _debugAudioBuffer;
 
         private SherpaOnnxService() { }
 
@@ -143,8 +147,25 @@ namespace MoshiLiveCaption
 
         public void Start()
         {
-            if (_recognizer == null || _stream == null) return;
+            if (_recognizer == null) return;
             if (_isRunning) return;
+            
+            // Reset stream to clear any previous audio buffer
+            lock (_lock)
+            {
+                _stream?.Dispose();
+                _stream = _recognizer.CreateStream();
+            }
+            
+            _sampleCount = 0;
+            _lastSentText = "";
+            
+            // Initialize debug audio buffer if enabled
+            if (SaveDebugAudio)
+            {
+                _debugAudioBuffer = new List<float>();
+                Console.WriteLine("[Debug] Audio recording enabled - will save to sherpa-onnx.wav");
+            }
             
             _isRunning = true;
             _decodeThread = new Thread(DecodeLoop);
@@ -152,12 +173,27 @@ namespace MoshiLiveCaption
             _decodeThread.Start();
         }
 
+        private int _sampleCount = 0;
+        
         public void AcceptWaveform(float[] samples)
         {
             if (!_isRunning || _stream == null) return;
             lock (_lock)
             {
                 _stream?.AcceptWaveform(16000, samples);
+                _sampleCount += samples.Length;
+                
+                // Collect samples for debug save
+                if (SaveDebugAudio && _debugAudioBuffer != null)
+                {
+                    _debugAudioBuffer.AddRange(samples);
+                }
+                
+                // Log every ~1 second worth of samples
+                if (_sampleCount % 16000 < samples.Length)
+                {
+                    Console.WriteLine($"[Sherpa] Received {_sampleCount} total samples");
+                }
             }
         }
 
@@ -309,6 +345,13 @@ namespace MoshiLiveCaption
             _isRunning = false;
             _decodeThread?.Join(200);
             
+            // Save debug audio if enabled
+            if (SaveDebugAudio && _debugAudioBuffer != null && _debugAudioBuffer.Count > 0)
+            {
+                SaveDebugWav();
+            }
+            _debugAudioBuffer = null;
+            
             // Reset stream but keep model loaded
             lock (_lock)
             {
@@ -317,6 +360,32 @@ namespace MoshiLiveCaption
                     _stream?.Dispose();
                     _stream = _recognizer.CreateStream();
                 }
+            }
+        }
+        
+        private void SaveDebugWav()
+        {
+            if (_debugAudioBuffer == null || _debugAudioBuffer.Count == 0) return;
+            
+            try
+            {
+                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sherpa-onnx.wav");
+                
+                using var writer = new WaveFileWriter(path, new WaveFormat(16000, 16, 1));
+                float[] samples = _debugAudioBuffer.ToArray();
+                
+                // Convert float to 16-bit PCM
+                foreach (float sample in samples)
+                {
+                    short pcm = (short)(sample * 32767);
+                    writer.WriteSample(sample);
+                }
+                
+                Console.WriteLine($"[Debug] Saved {samples.Length} samples ({samples.Length / 16000.0:F1}s) to: {path}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Debug] Failed to save WAV: {ex.Message}");
             }
         }
 
