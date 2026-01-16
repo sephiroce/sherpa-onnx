@@ -173,14 +173,12 @@ This creates a single executable with all dependencies included.
 ```powershell
 cd third_party/sherpa-onnx/dotnet-examples/online-decode-gui
 
-# Publish the .NET application
-dotnet publish -c Release -r win-x64 --self-contained true -o ./publish
+# Publish with all native DLLs included
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
 
-# MANUALLY Copy the GPU native DLLs to the publish folder
-# (These are not automatically included by dotnet publish)
+# After publish, copy GPU native DLLs to the publish folder
 Copy-Item -Path "..\..\build\bin\Release\*.dll" -Destination "./publish" -Force
 Copy-Item -Path "..\..\build\_deps\onnxruntime-src\lib\*.dll" -Destination "./publish" -Force
-
 ```
 
 ### Notes
